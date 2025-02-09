@@ -6,12 +6,13 @@ from pyglet import clock
 from pyglet.window import key, mouse
 import time
 from collections import OrderedDict
+import math
 
 # 配置区
 FOLDER = "./img"
 DURATION = 5
 TRANSITION = 1
-MAX_IMAGES = 20  # 最大缓存图片数量
+MAX_IMAGES = 30  # 最大缓存图片数量
 
 # 缓动函数库
 def ease_out_quad(t):
@@ -24,7 +25,7 @@ window = pyglet.window.Window(width=800, height=600, resizable=True)
 
 images = [f for f in glob(os.path.join(FOLDER, '**/*.*'), recursive=True)
           if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
-# random.shuffle(images)
+random.shuffle(images)  # 初始随机排序
 
 # 缓存 Image 对象而非 Sprite，减少长期引用
 image_cache = OrderedDict()
@@ -38,7 +39,10 @@ class SlideShow:
         self.old_img = None      # 过渡中的旧 Sprite
         self.animation_start_time = 0
         self.manual_mode = False # 手动模式标识，True 时停止自动播放
-        self.history = []        # 存储历史图片路径，用于切换上一张
+        self.current_index = 0   # 当前图片索引
+        # 新增缩略图模式相关属性
+        self.thumbnail_mode = False
+        self.thumbnail_page = 0  # 当前缩略图页码
 
     def get_sprite_from_path(self, path):
         if path not in image_cache:
@@ -68,14 +72,60 @@ class SlideShow:
         self.center_sprite(sprite, window.width, window.height)
         return sprite
 
-    def load_next(self):
-        if not images:
-            return
-        # 获取下一张图片路径，并进行循环
-        path = images.pop(0)
-        images.append(path)
-        self.next_img = self.get_sprite_from_path(path)
-        self.history.append(path)
+    def get_thumbnail_sprite(self, path):
+        # 与 get_sprite_from_path 类似，但不加入 batch，并调整为缩略图尺寸
+        if path not in image_cache:
+            img = pyglet.image.load(path)
+            image_cache[path] = img
+            while len(image_cache) > MAX_IMAGES:
+                oldest_path, oldest_img = image_cache.popitem(last=False)
+                try:
+                    oldest_texture = oldest_img.get_texture()
+                    oldest_texture.delete()
+                except Exception as e:
+                    print(f"清理缓存时出错: {e}")
+        else:
+            image_cache.move_to_end(path)
+        sprite = pyglet.sprite.Sprite(image_cache[path])
+        return sprite
+
+    def draw_thumbnails(self):
+        # 每页显示10张缩略图，采用 5 列 2 行的布局
+        total = len(images)
+        start_index = self.thumbnail_page
+        end_index = min(start_index + 10, total)
+        padding = 10
+        columns = 5
+        rows = 2
+
+        # 为每个单元格（cell）计算固定宽度和高度
+        cell_width = (window.width - (columns + 1) * padding) / columns
+        cell_height = (window.height - (rows + 1) * padding) / rows
+
+        for idx in range(start_index, end_index):
+            path = images[idx]
+            sprite = self.get_thumbnail_sprite(path)
+            # 计算缩放因子，使图片能适应单元格（保持长宽比）
+            scale_w = cell_width / sprite.image.width
+            scale_h = cell_height / sprite.image.height
+            scale_factor = min(scale_w, scale_h)
+            sprite.update(scale=scale_factor)
+            # 确认缩放后图片的尺寸
+            thumb_w, thumb_h = sprite.width, sprite.height
+
+            # 根据在当前页的位置计算行列索引
+            pos_in_page = idx - start_index
+            col = pos_in_page % columns
+            row = pos_in_page // columns
+
+            # 计算每个单元格的左下角坐标
+            cell_x = padding + col * (cell_width + padding)
+            cell_y = window.height - padding - (row + 1) * cell_height - row * padding
+
+            # 居中显示图片
+            sprite.x = cell_x + (cell_width - thumb_w) / 2
+            sprite.y = cell_y + (cell_height - thumb_h) / 2
+            sprite.draw()
 
     def scale_to_fit(self, sprite, max_width, max_height):
         scale = min(max_width / sprite.width, max_height / sprite.height)
@@ -84,6 +134,15 @@ class SlideShow:
     def center_sprite(self, sprite, max_width, max_height):
         sprite.x = (max_width - sprite.width) // 2
         sprite.y = (max_height - sprite.height) // 2
+
+    def load_next(self):
+        if not images:
+            return
+        # 计算下一张索引
+        next_index = (self.current_index + 1) % len(images)
+        path = images[next_index]
+        self.next_img = self.get_sprite_from_path(path)
+        self.current_index = next_index
 
     def transition(self, dt):
         # 如果处于手动模式或正处于过渡中，则跳过自动过渡
@@ -121,7 +180,6 @@ class SlideShow:
             self.next_img = None
             self.transitioning = False
             if self.old_img:
-                # 不调用 delete()，直接丢弃引用即可
                 self.old_img = None
 
     def fade_out_old(self, dt):
@@ -143,16 +201,16 @@ class SlideShow:
             self.old_img = None
 
         self.manual_mode = True
-        self.load_next()
-        # 直接放弃当前 sprite，不调用 delete()
-        self.current = self.next_img
-        self.next_img = None
+        # 直接加载下一张
+        next_index = (self.current_index + 1) % len(images)
+        path = images[next_index]
+        self.current_index = next_index
+        self.current = self.get_sprite_from_path(path)
 
     def show_prev_manual(self):
-        # 如果没有前一张，则不操作
-        if len(self.history) < 2:
-            return
-
+        # 计算上一张索引
+        prev_index = (self.current_index - 1) % len(images)
+        
         # 停止任何动画
         if self.transitioning:
             clock.unschedule(self.slide_left)
@@ -161,22 +219,35 @@ class SlideShow:
             self.old_img = None
 
         self.manual_mode = True
-        # 弹出当前图片的路径
-        self.history.pop()
-        prev_path = self.history[-1]
-        sprite = self.get_sprite_from_path(prev_path)
-        self.current = sprite
+        # 加载上一张
+        path = images[prev_index]
+        self.current_index = prev_index
+        self.current = self.get_sprite_from_path(path)
+
+    def exit_thumbnail_mode(self):
+        """
+        退出缩略图模式时，更新当前索引为当前页第一张
+        """
+        self.thumbnail_mode = False
+        self.manual_mode = False
+        self.current_index = self.thumbnail_page
+        if self.current_index >= len(images):
+            self.current_index = 0
+        # 加载当前索引的图片
+        path = images[self.current_index]
+        self.current = self.get_sprite_from_path(path)
 
 slides = SlideShow()
-slides.load_next()
-# 初次加载时直接显示第一张图片
-slides.current = slides.next_img
-slides.next_img = None
+# 初次加载当前图片
+if images:
+    slides.current = slides.get_sprite_from_path(images[0])
 
 @window.event
 def on_draw():
     window.clear()
-    if slides.transitioning:
+    if slides.thumbnail_mode:
+        slides.draw_thumbnails()
+    elif slides.transitioning:
         if slides.old_img:
             slides.old_img.draw()
         slides.next_img.draw()
@@ -186,6 +257,29 @@ def on_draw():
 
 @window.event
 def on_key_press(symbol, modifiers):
+    # 回车键切换缩略图模式
+    if symbol in (key.ENTER, key.RETURN):
+        if slides.thumbnail_mode:
+            slides.exit_thumbnail_mode()
+            return
+        else:
+            slides.thumbnail_mode = True
+            slides.thumbnail_page = slides.current_index  # 当前图片作为缩略图列表的第一张
+            slides.manual_mode = True  # 停止自动播放
+            return
+
+    # 在缩略图模式下使用上、下键翻页，每次移动10张
+    if slides.thumbnail_mode:
+        if symbol == key.UP:
+            if slides.thumbnail_page - 10 >= 0:
+                slides.thumbnail_page -= 10
+            return
+        elif symbol == key.DOWN:
+            if slides.thumbnail_page + 10 < len(images):
+                slides.thumbnail_page += 10
+            return
+
+    # 普通播放模式下的按键响应
     if symbol == key.SPACE:
         # 恢复自动播放模式，从当前图片开始
         slides.manual_mode = False
@@ -195,8 +289,8 @@ def on_key_press(symbol, modifiers):
         slides.show_prev_manual()
 
 def update(dt):
-    # 仅当不处于手动模式时，自动切换
-    if not slides.manual_mode:
+    # 仅当不处于手动模式且不在缩略图模式下时自动切换
+    if not slides.manual_mode and not slides.thumbnail_mode:
         slides.load_next()
         slides.transition(dt)
 
