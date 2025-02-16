@@ -12,7 +12,8 @@ import math
 FOLDER = "./img"
 DURATION = 5
 TRANSITION = 1
-MAX_IMAGES = 30  # 最大缓存图片数量
+MAX_IMAGES = 20  # 最大缓存图片数量
+PROGRESS_BAR_HEIGHT = 10  # 新增进度条高度配置
 
 # 缓动函数库
 def ease_out_quad(t):
@@ -21,7 +22,7 @@ def ease_out_quad(t):
 def ease_out_cubic(t):
     return 1 - (1 - t)**3
 
-window = pyglet.window.Window(width=800, height=600, resizable=True)
+window = pyglet.window.Window(width=900, height=600, resizable=True, style="None")
 
 images = [f for f in glob(os.path.join(FOLDER, '**/*.*'), recursive=True)
           if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
@@ -43,6 +44,10 @@ class SlideShow:
         # 新增缩略图模式相关属性
         self.thumbnail_mode = False
         self.thumbnail_page = 0  # 当前缩略图页码
+        # 新增进度条相关属性
+        self.progress_bg_color = (11, 11, 11, 255)    # #333
+        self.progress_fg_color = (102, 102, 102, 255) # #666
+        
 
     def get_sprite_from_path(self, path):
         if path not in image_cache:
@@ -242,6 +247,7 @@ slides = SlideShow()
 if images:
     slides.current = slides.get_sprite_from_path(images[0])
 
+
 @window.event
 def on_draw():
     window.clear()
@@ -254,6 +260,35 @@ def on_draw():
     else:
         if slides.current:
             slides.current.draw()
+    
+    # 新增进度条绘制逻辑
+    if not slides.manual_mode and not slides.thumbnail_mode and images:
+        # 计算进度条参数
+        total = len(images)
+        progress = (slides.current_index + 1) / total  # +1 因为索引从0开始
+        bar_width = window.width * progress
+
+        # 绘制背景条
+        bg = pyglet.shapes.Rectangle(0, 0, window.width, PROGRESS_BAR_HEIGHT,
+                                     color=slides.progress_bg_color[:3])
+        bg.opacity = slides.progress_bg_color[3]
+        bg.draw()
+        # 绘制前景条
+        fg = pyglet.shapes.Rectangle(0, 0, bar_width, PROGRESS_BAR_HEIGHT,
+                                     color=slides.progress_fg_color[:3])
+        fg.opacity = slides.progress_fg_color[3]
+        fg.draw()
+
+@window.event
+def on_resize(width, height):
+    # 新增窗口大小变化时重新定位精灵
+    if slides.current:
+        slides.scale_to_fit(slides.current, width, height)
+        slides.center_sprite(slides.current, width, height)
+    if slides.next_img:
+        slides.scale_to_fit(slides.next_img, width, height)
+        slides.center_sprite(slides.next_img, width, height)
+
 
 @window.event
 def on_key_press(symbol, modifiers):
