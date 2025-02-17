@@ -1,1 +1,1 @@
-pyinstaller --onefile --windowed --name view v.withDialog.py 
+pyinstaller --onefile --windowed --name view picview_withDialog.py 
