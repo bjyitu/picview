@@ -8,6 +8,20 @@ import time
 from collections import OrderedDict
 import math
 import AppKit
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from PIL import Image
+
+# import psutil
+
+# #内存测试
+# process = psutil.Process()
+
+# def print_memory():
+#     print(f"内存使用: {process.memory_info().rss // 1024} KB")
+
+# pyglet.clock.schedule_interval(lambda dt: print_memory(), 5)
+
 
 def choose_folder():
     panel = AppKit.NSOpenPanel.openPanel()
@@ -16,12 +30,10 @@ def choose_folder():
     panel.setAllowsMultipleSelection_(False)
     panel.setMessage_("请选择图片目录")
     if panel.runModal():
-        # 选择完成后隐藏窗口
         panel.orderOut_(None)
         selected_path = panel.URLs()[0].path()
     else:
         selected_path = "./img"
-    # 通过删除引用，让垃圾回收器在合适的时机回收该对象
     panel = None
     return selected_path
 
@@ -30,8 +42,10 @@ FOLDER = choose_folder()
 # 配置区
 DURATION = 5
 TRANSITION = 1
-MAX_IMAGES = 10  # 最大缓存图片数量
+MAX_IMAGES = 5
 PROGRESS_BAR_HEIGHT = 5
+THREAD_POOL_SIZE = 4
+THUMBNAIL_SIZE = (300, 300)
 
 def ease_out_quad(t):
     return t * (2 - t)
@@ -39,46 +53,40 @@ def ease_out_quad(t):
 def ease_out_cubic(t):
     return 1 - (1 - t)**3
 
-window = pyglet.window.Window(width=900, height=600, resizable=True, style="None", vsync=True )
+config = pyglet.gl.Config(double_buffer=True)
+window = pyglet.window.Window(config=config, width=900, height=600, resizable=True, style="None", vsync=True)
 
 images = [f for f in glob(os.path.join(FOLDER, '**/*.*'), recursive=True)
           if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
 random.shuffle(images)
 
-# 缓存 Image 对象而非 Sprite
 image_cache = OrderedDict()
 
 class SlideShow:
     def __init__(self):
         self.batch = pyglet.graphics.Batch()
-        self.current = None      # 当前显示的 Sprite
-        self.next_img = None     # 下一张 Sprite（预加载）
+        self.current = None
+        self.next_img = None
         self.transitioning = False
-        self.old_img = None      # 过渡中的旧 Sprite
+        self.old_img = None
         self.animation_start_time = 0
         self.manual_mode = False
         self.current_index = 0
         self.thumbnail_mode = False
-        self.thumbnail_page = 0  # 当前缩略图页码（images 中的索引）
-        self.thumbnail_cache = {}  # 预生成的缩略图页面缓存
-        self.progress_bg_color = (11, 11, 11, 255)    # #333
-        self.progress_fg_color = (102, 102, 102, 255)   # #666
+        self.thumbnail_page = 0
+        self.thumbnail_cache = {}
+        self.progress_bg_color = (11, 11, 11, 255)
+        self.progress_fg_color = (102, 102, 102, 255)
         self.progress_bg = pyglet.shapes.Rectangle(0, 0, 0, 0, color=(0,0,0))
         self.progress_fg = pyglet.shapes.Rectangle(0, 0, 0, 0, color=(0,0,0))
         self.progress_bg.visible = False
         self.progress_fg.visible = False
-        self.preload_thumbnail_pages()
-
-    def preload_thumbnail_pages(self):
-        num_pages_to_preload = int(MAX_IMAGES/10)
-        print(f"缓存页数：{num_pages_to_preload}")
-        try:
-	        for i in range(num_pages_to_preload):
-	            start_index = i * 10
-	            if start_index < len(images):
-	                self.thumbnail_cache[start_index] = self.generate_thumbnail_page(start_index)
-        except Exception as e:
-            print(f"创建缩略图缓存出错 {e}")
+        
+        # 多线程相关初始化
+        self.executor = ThreadPoolExecutor(max_workers=THREAD_POOL_SIZE)
+        self.lock = threading.Lock()
+        self.pending_tasks = []
+        self.thumbnail_data_cache = {}
 
     def update_progress(self, progress):
         if self.manual_mode or self.thumbnail_mode or not images:
@@ -102,70 +110,137 @@ class SlideShow:
         self.progress_bg.visible = True
         self.progress_fg.visible = True
 
+    def clean_cache(self):
+        while len(image_cache) > MAX_IMAGES:
+            oldest_path, oldest_img = image_cache.popitem(last=False)
+            try:
+                oldest_img.get_texture().delete()
+                print(f"清理缓存完成")
+            except Exception as e:
+                print(f"清理缓存时出错: {e}")
+
     def get_sprite_from_path(self, path, add_to_batch=True):
         if path not in image_cache:
             img = pyglet.image.load(path)
             image_cache[path] = img
-            while len(image_cache) > MAX_IMAGES:
-                oldest_path, oldest_img = image_cache.popitem(last=False)
-                try:
-                    oldest_texture = oldest_img.get_texture()
-                    oldest_texture.delete()
-                except Exception as e:
-                    print(f"清理缓存时出错: {e}")
         else:
             image_cache.move_to_end(path)
-            while len(image_cache) > MAX_IMAGES:
-                oldest_path, oldest_img = image_cache.popitem(last=False)
-                try:
-                    oldest_texture = oldest_img.get_texture()
-                    oldest_texture.delete()
-                except Exception as e:
-                    print(f"清理缓存时出错: {e}")
-        if add_to_batch:
-            sprite = pyglet.sprite.Sprite(image_cache[path], batch=self.batch)
-        else:
-            sprite = pyglet.sprite.Sprite(image_cache[path])
+        self.clean_cache()
+
+        sprite = pyglet.sprite.Sprite(image_cache[path], batch=self.batch if add_to_batch else None)
         self.scale_to_fit(sprite, window.width, window.height)
         self.center_sprite(sprite, window.width, window.height)
         window.set_caption(os.path.basename(path))
         return sprite
 
-    def get_thumbnail_sprite(self, path):
-        return self.get_sprite_from_path(path, add_to_batch=False)
+    def generate_thumbnail_data(self, path):
+        """ 在后台线程中生成缩略图数据 """
+        try:
+            with Image.open(path) as img:
+                img.thumbnail(THUMBNAIL_SIZE)
+                # 垂直翻转图像适配pyglet坐标系
+                img = img.transpose(Image.FLIP_TOP_BOTTOM)
+                return path, img.convert("RGBA").tobytes(), img.size
+        except Exception as e:
+            print(f"生成缩略图失败: {e}")
+            return None
+
+    def create_sprite_from_data(self, data):
+        """ 在主线程创建精灵 """
+        try:
+            if not pyglet.gl.current_context:
+                print("无OpenGL上下文，跳过创建精灵")
+                return None
+            path, image_data, size = data
+            image = pyglet.image.ImageData(size[0], size[1], 'RGBA', image_data)
+            sprite = pyglet.sprite.Sprite(image)
+            sprite.path = path  # 保存路径用于点击检测
+            return sprite
+        except Exception as e:
+            print(f"创建精灵失败: {e}")
+            return None
 
     def generate_thumbnail_page(self, start_index):
-        sprites = []
+        """ 生成缩略图页面（多线程版） """
         total = len(images)
         end_index = min(start_index + 10, total)
+        page_key = (start_index, window.width, window.height)
+        
+        if page_key in self.thumbnail_cache:
+            return self.thumbnail_cache[page_key]
+
+        # 创建有效的透明占位符
+        placeholder_img = pyglet.image.ImageData(1, 1, 'RGBA', b'\x00\x00\x00\x00')
+        sprites = []
+        for idx in range(start_index, end_index):
+            path = images[idx]
+            if path in self.thumbnail_data_cache:
+                data = self.thumbnail_data_cache[path]
+                sprites.append(self.create_sprite_from_data(data))
+            else:
+                future = self.executor.submit(self.generate_thumbnail_data, path)
+                future.add_done_callback(lambda f, idx=idx: self._thumbnail_ready(f, start_index, idx))
+                self.pending_tasks.append(future)
+                # 创建临时占位精灵
+                placeholder = pyglet.sprite.Sprite(placeholder_img)
+                placeholder.width = THUMBNAIL_SIZE[0]
+                placeholder.height = THUMBNAIL_SIZE[1]
+                sprites.append(placeholder)
+
+        self.thumbnail_cache[page_key] = sprites
+        return self.thumbnail_cache[page_key]
+
+    def _thumbnail_ready(self, future, page_start, idx_in_page):
+        """ 缩略图生成完成回调 """
+        try:
+            result = future.result()
+            if not result:
+                return
+            
+            path, image_data, size = result
+            # 将OpenGL操作调度到主线程
+            def update_thumbnail(dt):
+                with self.lock:
+                    self.thumbnail_data_cache[path] = result
+                    
+                    page_key = (page_start, window.width, window.height)
+                    if page_key in self.thumbnail_cache:
+                        sprite = self.create_sprite_from_data(result)
+                        self._position_thumbnail(sprite, page_start, idx_in_page)
+                        # 安全替换缩略图缓存
+                        self.thumbnail_cache[page_key][idx_in_page - page_start] = sprite
+            pyglet.clock.schedule_once(update_thumbnail, 0)
+        except Exception as e:
+            print(f"处理缩略图回调时出错: {e}")
+
+    def _position_thumbnail(self, sprite, start_index, idx):
+        """ 定位缩略图位置 """
+        # 在计算缩放前添加安全检查
+        if sprite.width == 0 or sprite.height == 0:
+            return
         padding = 10
         columns = 5
         rows = 2
         cell_width = (window.width - (columns + 1) * padding) / columns
         cell_height = (window.height - (rows + 1) * padding) / rows
 
-        for idx in range(start_index, end_index):
-            path = images[idx]
-            sprite = self.get_thumbnail_sprite(path)
-            scale_w = cell_width / sprite.image.width
-            scale_h = cell_height / sprite.image.height
-            scale_factor = min(scale_w, scale_h)
-            sprite.update(scale=scale_factor)
-            thumb_w, thumb_h = sprite.width, sprite.height
-            pos_in_page = idx - start_index
-            col = pos_in_page % columns
-            row = pos_in_page // columns
-            cell_x = padding + col * (cell_width + padding)
-            cell_y = window.height - padding - (row + 1) * cell_height - row * padding
-            sprite.x = cell_x + (cell_width - thumb_w) / 2
-            sprite.y = cell_y + (cell_height - thumb_h) / 2
-            sprites.append(sprite)
-        return sprites
+        pos_in_page = idx - start_index
+        col = pos_in_page % columns
+        row = pos_in_page // columns
+        cell_x = padding + col * (cell_width + padding)
+        cell_y = window.height - padding - (row + 1) * cell_height - row * padding
+
+        scale_w = cell_width / sprite.width
+        scale_h = cell_height / sprite.height
+        scale_factor = min(scale_w, scale_h)
+        sprite.update(scale=scale_factor)
+        sprite.x = cell_x + (cell_width - sprite.width) / 2
+        sprite.y = cell_y + (cell_height - sprite.height) / 2
 
     def draw_thumbnails(self):
-        if self.thumbnail_page not in self.thumbnail_cache:
-            self.thumbnail_cache[self.thumbnail_page] = self.generate_thumbnail_page(self.thumbnail_page)
-        for sprite in self.thumbnail_cache[self.thumbnail_page]:
+        page_key = (self.thumbnail_page, window.width, window.height)
+        sprites = self.generate_thumbnail_page(self.thumbnail_page)
+        for sprite in sprites:
             sprite.draw()
 
     def scale_to_fit(self, sprite, max_width, max_height):
@@ -181,7 +256,6 @@ class SlideShow:
             return
         next_index = (self.current_index + 1) % len(images)
         path = images[next_index]
-        # 获取下一个 sprite，但不改变当前 batch 里的 sprite
         self.next_img = self.get_sprite_from_path(path)
         self.current_index = next_index
 
@@ -191,14 +265,11 @@ class SlideShow:
         self.transitioning = True
         self.animation_start_time = time.time()
         if self.current:
-
             self.old_img = self.current
             self.old_img.opacity = 255
-        effect = random.choice(['slide_left'])
-        if effect == 'slide_left':
-            self.next_img.x = window.width
-            clock.schedule_interval(self.slide_left, 1/60)
-            clock.schedule_interval(self.fade_out_old, 1/60)
+        self.next_img.x = window.width
+        clock.schedule_interval(self.slide_left, 1/59)
+        clock.schedule_interval(self.fade_out_old, 1/59)
 
     def slide_left(self, dt):
         elapsed = time.time() - self.animation_start_time
@@ -211,7 +282,6 @@ class SlideShow:
             self.current = self.next_img
             self.next_img = None
             self.transitioning = False
-            # 删除过渡期间的旧 sprite
             if self.old_img:
                 self.old_img = None
 
@@ -265,14 +335,31 @@ class SlideShow:
             except Exception as e:
                 print(f"删除当前 sprite 出错: {e}")
         self.current = self.get_sprite_from_path(path)
-        # 清理缩略图缓存时删除所有缩略图 sprite
-        for page in self.thumbnail_cache.values():
-            for sprite in page:
-                try:
-                    sprite.delete()
-                except Exception as e:
-                    print(f"删除缩略图 sprite 出错: {e}")
-        self.thumbnail_cache.clear()
+        self._cleanup_thumbnails()
+
+    def _cleanup_thumbnails(self):
+        """ 改进后的缩略图清理 """
+        def do_cleanup(dt):
+            # 终止进行中的任务
+            for task in self.pending_tasks:
+                if not task.done():
+                    task.cancel()
+            self.pending_tasks.clear()
+
+            deleted_count = 0
+            for page in self.thumbnail_cache.values():
+                for sprite in page:
+                    try:
+                        sprite.delete()
+                        deleted_count += 1
+                        print(f"已清理 {deleted_count} 个缩略图精灵")
+                    except Exception as e:
+                        print(f"删除缩略图 sprite 出错: {e}")
+
+            self.thumbnail_cache.clear()
+            self.thumbnail_data_cache.clear()
+        
+        pyglet.clock.schedule_once(do_cleanup, 0)
 
 slides = SlideShow()
 if images:
@@ -307,63 +394,41 @@ def on_resize(width, height):
         slides.scale_to_fit(slides.next_img, width, height)
         slides.center_sprite(slides.next_img, width, height)
     if slides.thumbnail_mode:
-        # 窗口尺寸变化时重建缩略图缓存
-        for page in slides.thumbnail_cache.values():
-            for sprite in page:
-                try:
-                    sprite.delete()
-                except Exception as e:
-                    print(f"删除缩略图 sprite 出错: {e}")
-        slides.thumbnail_cache.clear()
+        slides._cleanup_thumbnails()
 
 @window.event
 def on_key_press(symbol, modifiers):
     if symbol in (key.ENTER, key.RETURN):
         if slides.thumbnail_mode:
             slides.exit_thumbnail_mode()
-            return
         else:
             slides.thumbnail_mode = True
             slides.thumbnail_page = slides.current_index
             slides.manual_mode = True
-            # for page in slides.thumbnail_cache.values():
-            #     for sprite in page:
-            #         try:
-            #             sprite.delete()
-            #         except Exception as e:
-            #             print(f"删除缩略图 sprite 出错: {e}")
-            # slides.thumbnail_cache.clear()
-            return
+        return
     if slides.thumbnail_mode:
         if symbol == key.UP:
             if slides.thumbnail_page - 10 >= 0:
                 slides.thumbnail_page -= 10
-                for page in slides.thumbnail_cache.values():
-                    for sprite in page:
-                        try:
-                            sprite.delete()
-                        except Exception as e:
-                            print(f"删除缩略图 sprite 出错: {e}")
-                slides.thumbnail_cache.clear()
-            return
+                slides._cleanup_thumbnails()
         elif symbol == key.DOWN:
             if slides.thumbnail_page + 10 < len(images):
                 slides.thumbnail_page += 10
-                for page in slides.thumbnail_cache.values():
-                    for sprite in page:
-                        try:
-                            sprite.delete()
-                        except Exception as e:
-                            print(f"删除缩略图 sprite 出错: {e}")
-                slides.thumbnail_cache.clear()
-            return
+                slides._cleanup_thumbnails()
     else:
         if symbol == key.SPACE:
             slides.manual_mode = False
         elif symbol == key.RIGHT:
-            slides.show_next_manual()
+            if slides.current_index < len(images) - 1:
+                slides.show_next_manual()
         elif symbol == key.LEFT:
-            slides.show_prev_manual()
+            if slides.current_index > 0:
+                slides.show_prev_manual()
+@window.event
+def on_close():
+    slides._cleanup_thumbnails()
+    slides.executor.shutdown(wait=False)
+    window.close()
 
 def update(dt):
     if not slides.manual_mode and not slides.thumbnail_mode:
