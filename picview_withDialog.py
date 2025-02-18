@@ -7,7 +7,6 @@ from pyglet.window import key, mouse
 import time
 from collections import OrderedDict
 import math
-
 import AppKit
 
 def choose_folder():
@@ -16,21 +15,24 @@ def choose_folder():
     panel.setCanChooseDirectories_(True)
     panel.setAllowsMultipleSelection_(False)
     panel.setMessage_("请选择图片目录")
-    # 如果用户点击“确定”，返回选中的目录，否则返回默认目录
     if panel.runModal():
-        return panel.URLs()[0].path()
-    return "./img"
+        # 选择完成后隐藏窗口
+        panel.orderOut_(None)
+        selected_path = panel.URLs()[0].path()
+    else:
+        selected_path = "./img"
+    # 通过删除引用，让垃圾回收器在合适的时机回收该对象
+    panel = None
+    return selected_path
 
 FOLDER = choose_folder()
 
 # 配置区
-# FOLDER = "./img"
 DURATION = 5
 TRANSITION = 1
-MAX_IMAGES = 30  # 最大缓存图片数量
-PROGRESS_BAR_HEIGHT = 10  # 新增进度条高度配置
+MAX_IMAGES = 10  # 最大缓存图片数量
+PROGRESS_BAR_HEIGHT = 5
 
-# 缓动函数库
 def ease_out_quad(t):
     return t * (2 - t)
 
@@ -41,9 +43,9 @@ window = pyglet.window.Window(width=900, height=600, resizable=True, style="None
 
 images = [f for f in glob(os.path.join(FOLDER, '**/*.*'), recursive=True)
           if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
-random.shuffle(images)  # 初始随机排序
+random.shuffle(images)
 
-# 缓存 Image 对象而非 Sprite，减少长期引用
+# 缓存 Image 对象而非 Sprite
 image_cache = OrderedDict()
 
 class SlideShow:
@@ -54,33 +56,31 @@ class SlideShow:
         self.transitioning = False
         self.old_img = None      # 过渡中的旧 Sprite
         self.animation_start_time = 0
-        self.manual_mode = False # 手动模式标识，True 时停止自动播放
-        self.current_index = 0   # 当前图片索引
-        # 缩略图模式相关属性
+        self.manual_mode = False
+        self.current_index = 0
         self.thumbnail_mode = False
-        self.thumbnail_page = 0  # 当前缩略图页码，表示第一页中第一张图片在 images 中的索引
-        # 缓存预生成的缩略图页面，键为起始索引，值为该页面 Sprite 列表
-        self.thumbnail_cache = {}
-        # 进度条相关属性
+        self.thumbnail_page = 0  # 当前缩略图页码（images 中的索引）
+        self.thumbnail_cache = {}  # 预生成的缩略图页面缓存
         self.progress_bg_color = (11, 11, 11, 255)    # #333
         self.progress_fg_color = (102, 102, 102, 255)   # #666
         self.progress_bg = pyglet.shapes.Rectangle(0, 0, 0, 0, color=(0,0,0))
         self.progress_fg = pyglet.shapes.Rectangle(0, 0, 0, 0, color=(0,0,0))
         self.progress_bg.visible = False
         self.progress_fg.visible = False
-        # 新增：预加载缩略图页面
         self.preload_thumbnail_pages()
 
     def preload_thumbnail_pages(self):
-        # 预加载前几页缩略图
-        num_pages_to_preload = 3  # 可根据需要调整预加载的页数
-        for i in range(num_pages_to_preload):
-            start_index = i * 10
-            if start_index < len(images):
-                self.thumbnail_cache[start_index] = self.generate_thumbnail_page(start_index)
+        num_pages_to_preload = int(MAX_IMAGES/10)
+        print(f"缓存页数：{num_pages_to_preload}")
+        try:
+	        for i in range(num_pages_to_preload):
+	            start_index = i * 10
+	            if start_index < len(images):
+	                self.thumbnail_cache[start_index] = self.generate_thumbnail_page(start_index)
+        except Exception as e:
+            print(f"创建缩略图缓存出错 {e}")
 
     def update_progress(self, progress):
-        # 动态更新进度条尺寸和可见性
         if self.manual_mode or self.thumbnail_mode or not images:
             self.progress_bg.visible = False
             self.progress_fg.visible = False
@@ -102,11 +102,10 @@ class SlideShow:
         self.progress_bg.visible = True
         self.progress_fg.visible = True
 
-    def get_sprite_from_path(self, path):
+    def get_sprite_from_path(self, path, add_to_batch=True):
         if path not in image_cache:
             img = pyglet.image.load(path)
             image_cache[path] = img
-            # 加载新图片后清理超出缓存数量的图片
             while len(image_cache) > MAX_IMAGES:
                 oldest_path, oldest_img = image_cache.popitem(last=False)
                 try:
@@ -123,31 +122,19 @@ class SlideShow:
                     oldest_texture.delete()
                 except Exception as e:
                     print(f"清理缓存时出错: {e}")
-        sprite = pyglet.sprite.Sprite(image_cache[path], batch=self.batch)
+        if add_to_batch:
+            sprite = pyglet.sprite.Sprite(image_cache[path], batch=self.batch)
+        else:
+            sprite = pyglet.sprite.Sprite(image_cache[path])
         self.scale_to_fit(sprite, window.width, window.height)
         self.center_sprite(sprite, window.width, window.height)
         window.set_caption(os.path.basename(path))
         return sprite
 
     def get_thumbnail_sprite(self, path):
-        # 与 get_sprite_from_path 类似，但不加入 batch，并用于生成缩略图
-        if path not in image_cache:
-            img = pyglet.image.load(path)
-            image_cache[path] = img
-            while len(image_cache) > MAX_IMAGES:
-                oldest_path, oldest_img = image_cache.popitem(last=False)
-                try:
-                    oldest_texture = oldest_img.get_texture()
-                    oldest_texture.delete()
-                except Exception as e:
-                    print(f"清理缓存时出错: {e}")
-        else:
-            image_cache.move_to_end(path)
-        sprite = pyglet.sprite.Sprite(image_cache[path])
-        return sprite
+        return self.get_sprite_from_path(path, add_to_batch=False)
 
     def generate_thumbnail_page(self, start_index):
-        # 每页显示10张缩略图，采用 5 列 2 行布局
         sprites = []
         total = len(images)
         end_index = min(start_index + 10, total)
@@ -176,7 +163,6 @@ class SlideShow:
         return sprites
 
     def draw_thumbnails(self):
-        # 优化：预生成并缓存当前页面的缩略图 Sprite 列表
         if self.thumbnail_page not in self.thumbnail_cache:
             self.thumbnail_cache[self.thumbnail_page] = self.generate_thumbnail_page(self.thumbnail_page)
         for sprite in self.thumbnail_cache[self.thumbnail_page]:
@@ -195,6 +181,7 @@ class SlideShow:
             return
         next_index = (self.current_index + 1) % len(images)
         path = images[next_index]
+        # 获取下一个 sprite，但不改变当前 batch 里的 sprite
         self.next_img = self.get_sprite_from_path(path)
         self.current_index = next_index
 
@@ -204,6 +191,7 @@ class SlideShow:
         self.transitioning = True
         self.animation_start_time = time.time()
         if self.current:
+
             self.old_img = self.current
             self.old_img.opacity = 255
         effect = random.choice(['slide_left'])
@@ -223,6 +211,7 @@ class SlideShow:
             self.current = self.next_img
             self.next_img = None
             self.transitioning = False
+            # 删除过渡期间的旧 sprite
             if self.old_img:
                 self.old_img = None
 
@@ -240,7 +229,9 @@ class SlideShow:
             clock.unschedule(self.slide_left)
             clock.unschedule(self.fade_out_old)
             self.transitioning = False
-            self.old_img = None
+            if self.old_img:
+                self.old_img = None
+
         self.manual_mode = True
         next_index = (self.current_index + 1) % len(images)
         path = images[next_index]
@@ -248,13 +239,15 @@ class SlideShow:
         self.current = self.get_sprite_from_path(path)
 
     def show_prev_manual(self):
-        prev_index = (self.current_index - 1) % len(images)
         if self.transitioning:
             clock.unschedule(self.slide_left)
             clock.unschedule(self.fade_out_old)
             self.transitioning = False
-            self.old_img = None
+            if self.old_img:
+                self.old_img = None
+
         self.manual_mode = True
+        prev_index = (self.current_index - 1) % len(images)
         path = images[prev_index]
         self.current_index = prev_index
         self.current = self.get_sprite_from_path(path)
@@ -266,15 +259,25 @@ class SlideShow:
         if self.current_index >= len(images):
             self.current_index = 0
         path = images[self.current_index]
+        if self.current:
+            try:
+                self.current.delete()
+            except Exception as e:
+                print(f"删除当前 sprite 出错: {e}")
         self.current = self.get_sprite_from_path(path)
-        # 清理缩略图 Sprite 缓存，等待下次进入时重新生成
+        # 清理缩略图缓存时删除所有缩略图 sprite
+        for page in self.thumbnail_cache.values():
+            for sprite in page:
+                try:
+                    sprite.delete()
+                except Exception as e:
+                    print(f"删除缩略图 sprite 出错: {e}")
         self.thumbnail_cache.clear()
 
 slides = SlideShow()
 if images:
     slides.current = slides.get_sprite_from_path(images[0])
     window.set_caption(os.path.basename(images[0]))
-
 
 @window.event
 def on_draw():
@@ -284,7 +287,8 @@ def on_draw():
     elif slides.transitioning:
         if slides.old_img:
             slides.old_img.draw()
-        slides.next_img.draw()
+        if slides.next_img:
+            slides.next_img.draw()
     else:
         if slides.current:
             slides.current.draw()
@@ -302,8 +306,14 @@ def on_resize(width, height):
     if slides.next_img:
         slides.scale_to_fit(slides.next_img, width, height)
         slides.center_sprite(slides.next_img, width, height)
-    # 缩略图模式下窗口大小变化时清空缓存重新生成缩略图
     if slides.thumbnail_mode:
+        # 窗口尺寸变化时重建缩略图缓存
+        for page in slides.thumbnail_cache.values():
+            for sprite in page:
+                try:
+                    sprite.delete()
+                except Exception as e:
+                    print(f"删除缩略图 sprite 出错: {e}")
         slides.thumbnail_cache.clear()
 
 @window.event
@@ -314,21 +324,37 @@ def on_key_press(symbol, modifiers):
             return
         else:
             slides.thumbnail_mode = True
-            # 以当前图片在 images 中的索引作为当前页起始索引
             slides.thumbnail_page = slides.current_index
             slides.manual_mode = True
-            # 清空可能存在的缩略图缓存
-            slides.thumbnail_cache.clear()
+            # for page in slides.thumbnail_cache.values():
+            #     for sprite in page:
+            #         try:
+            #             sprite.delete()
+            #         except Exception as e:
+            #             print(f"删除缩略图 sprite 出错: {e}")
+            # slides.thumbnail_cache.clear()
             return
     if slides.thumbnail_mode:
         if symbol == key.UP:
             if slides.thumbnail_page - 10 >= 0:
                 slides.thumbnail_page -= 10
+                for page in slides.thumbnail_cache.values():
+                    for sprite in page:
+                        try:
+                            sprite.delete()
+                        except Exception as e:
+                            print(f"删除缩略图 sprite 出错: {e}")
                 slides.thumbnail_cache.clear()
             return
         elif symbol == key.DOWN:
             if slides.thumbnail_page + 10 < len(images):
                 slides.thumbnail_page += 10
+                for page in slides.thumbnail_cache.values():
+                    for sprite in page:
+                        try:
+                            sprite.delete()
+                        except Exception as e:
+                            print(f"删除缩略图 sprite 出错: {e}")
                 slides.thumbnail_cache.clear()
             return
     else:
