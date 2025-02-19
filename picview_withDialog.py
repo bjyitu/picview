@@ -12,15 +12,30 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 from PIL import Image
 
-# import psutil
+import psutil
+process = psutil.Process()
 
-# #内存测试
-# process = psutil.Process()
+def print_memory():
+    mem = process.memory_info().rss // 1024
+    textures = 0
+    valid_images = 0
+    
+    for img in image_cache.values():
+        try:
+            # 安全获取纹理对象
+            texture = img.get_texture()
+            if texture:
+                textures += 1
+            valid_images += 1
+        except AttributeError:
+            # 处理没有get_texture方法的对象
+            pass
+        except Exception as e:
+            print(f"纹理检测错误: {e}")
+    
+    print(f"内存使用: {mem} KB | 有效缓存: {valid_images}/{len(image_cache)} | 活跃纹理: {textures}")
 
-# def print_memory():
-#     print(f"内存使用: {process.memory_info().rss // 1024} KB")
-
-# pyglet.clock.schedule_interval(lambda dt: print_memory(), 5)
+pyglet.clock.schedule_interval(lambda dt: print_memory(), 5)
 
 
 def choose_folder():
@@ -42,10 +57,10 @@ FOLDER = choose_folder()
 # 配置区
 DURATION = 5
 TRANSITION = 1
-MAX_IMAGES = 5
+MAX_IMAGES = 2
 PROGRESS_BAR_HEIGHT = 5
 THREAD_POOL_SIZE = 4
-THUMBNAIL_SIZE = (300, 300)
+THUMBNAIL_SIZE = (500, 500)
 
 def ease_out_quad(t):
     return t * (2 - t)
@@ -114,24 +129,42 @@ class SlideShow:
         while len(image_cache) > MAX_IMAGES:
             oldest_path, oldest_img = image_cache.popitem(last=False)
             try:
-                oldest_img.get_texture().delete()
+                # 安全释放纹理资源
+                if hasattr(oldest_img, 'get_texture'):
+                    texture = oldest_img.get_texture()
+                    if texture:
+                        texture.delete()
+                # 解除所有引用
+                del oldest_img
                 print(f"清理缓存完成")
             except Exception as e:
                 print(f"清理缓存时出错: {e}")
 
     def get_sprite_from_path(self, path, add_to_batch=True):
         if path not in image_cache:
-            img = pyglet.image.load(path)
-            image_cache[path] = img
+            try:
+                # 确保加载的是Texture
+                img = pyglet.image.load(path)
+                if not isinstance(img, pyglet.image.Texture):
+                    img = img.get_texture()
+                image_cache[path] = img
+            except Exception as e:
+                print(f"加载图片失败: {path} - {e}")
+                return None
         else:
             image_cache.move_to_end(path)
+        
         self.clean_cache()
-
-        sprite = pyglet.sprite.Sprite(image_cache[path], batch=self.batch if add_to_batch else None)
-        self.scale_to_fit(sprite, window.width, window.height)
-        self.center_sprite(sprite, window.width, window.height)
-        window.set_caption(os.path.basename(path))
-        return sprite
+        
+        try:
+            sprite = pyglet.sprite.Sprite(image_cache[path], batch=self.batch if add_to_batch else None)
+            self.scale_to_fit(sprite, window.width, window.height)
+            self.center_sprite(sprite, window.width, window.height)
+            window.set_caption(os.path.basename(path))
+            return sprite
+        except Exception as e:
+            print(f"创建精灵失败: {e}")
+            return None
 
     def generate_thumbnail_data(self, path):
         """ 在后台线程中生成缩略图数据 """
@@ -194,12 +227,10 @@ class SlideShow:
         """ 缩略图生成完成回调 """
         try:
             result = future.result()
-            if not result:
-                return
-            
+
             path, image_data, size = result
-            # 将OpenGL操作调度到主线程
             def update_thumbnail(dt):
+
                 with self.lock:
                     self.thumbnail_data_cache[path] = result
                     
@@ -338,7 +369,6 @@ class SlideShow:
         self._cleanup_thumbnails()
 
     def _cleanup_thumbnails(self):
-        """ 改进后的缩略图清理 """
         def do_cleanup(dt):
             # 终止进行中的任务
             for task in self.pending_tasks:
@@ -346,18 +376,44 @@ class SlideShow:
                     task.cancel()
             self.pending_tasks.clear()
 
+            # 清空数据缓存
+            self.thumbnail_data_cache.clear()
+
+            # 释放所有缩略图精灵
             deleted_count = 0
             for page in self.thumbnail_cache.values():
                 for sprite in page:
                     try:
-                        sprite.delete()
-                        deleted_count += 1
-                        print(f"已清理 {deleted_count} 个缩略图精灵")
+                        if sprite is None:  # 跳过空精灵
+                            continue
+                        
+                        # 安全释放纹理资源
+                        if hasattr(sprite, 'image') and sprite.image is not None:
+                            # 检查是否存在get_texture方法
+                            if hasattr(sprite.image, 'get_texture'):
+                                texture = sprite.image.get_texture()
+                                if texture:
+                                    texture.delete()
+                                    print(f"删除缩略图 texture ")
+                            # 解除图像引用
+                            sprite.image = None
+                        
+                        # 删除精灵本身
+                        if hasattr(sprite, 'delete'):
+                            sprite.delete()
+                            deleted_count += 1
+                            print(f"删除缩略图 sprite : {deleted_count}")
+                    except AttributeError as e:
+                        if "'NoneType'" in str(e):  # 忽略None相关错误
+                            pass
                     except Exception as e:
-                        print(f"删除缩略图 sprite 出错: {e}")
+                        print(f"安全清理失败: {str(e)[:50]}...")  # 截短错误信息
 
+            # 清空缓存
             self.thumbnail_cache.clear()
-            self.thumbnail_data_cache.clear()
+            # 强制垃圾回收（可选）
+            import gc
+            gc.collect()
         
         pyglet.clock.schedule_once(do_cleanup, 0)
 
@@ -426,9 +482,23 @@ def on_key_press(symbol, modifiers):
                 slides.show_prev_manual()
 @window.event
 def on_close():
+    # 释放主图片缓存
+    for img in image_cache.values():
+        try:
+            img.get_texture().delete()
+        except: pass
+    image_cache.clear()
+    
+    # 释放幻灯片资源
+    if slides.current:
+        slides.current.image.get_texture().delete()
+    if slides.next_img:
+        slides.next_img.image.get_texture().delete()
+    
     slides._cleanup_thumbnails()
     slides.executor.shutdown(wait=False)
     window.close()
+    pyglet.app.exit()
 
 def update(dt):
     if not slides.manual_mode and not slides.thumbnail_mode:
