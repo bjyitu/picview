@@ -7,7 +7,7 @@ from pyglet.window import key, mouse
 import time
 from collections import OrderedDict
 import math
-import AppKit
+import subprocess # 用于执行 AppleScript 脚本打开文件选择对话框，代替pyobjc
 from concurrent.futures import ThreadPoolExecutor
 import threading
 from PIL import Image
@@ -39,18 +39,26 @@ pyglet.clock.schedule_interval(lambda dt: print_memory(), 5)
 
 
 def choose_folder():
-    panel = AppKit.NSOpenPanel.openPanel()
-    panel.setCanChooseFiles_(False)
-    panel.setCanChooseDirectories_(True)
-    panel.setAllowsMultipleSelection_(False)
-    panel.setMessage_("请选择图片目录")
-    if panel.runModal():
-        panel.orderOut_(None)
-        selected_path = panel.URLs()[0].path()
-    else:
-        selected_path = "./img"
-    panel = None
-    return selected_path
+    # AppleScript 脚本（直接返回 POSIX 路径）
+    script = '''
+    tell application "System Events"
+        activate
+        set selectedFolder to POSIX path of (choose folder with prompt "请选择图片目录")
+        return selectedFolder
+    end tell
+    '''
+    
+    try:
+        # 执行脚本并捕获输出
+        result = subprocess.check_output(['osascript', '-e', script], 
+                                        stderr=subprocess.STDOUT,
+                                        universal_newlines=True)
+        # 清理路径（去除换行符和空格）
+        return result.strip()
+    except subprocess.CalledProcessError as e:
+        # 用户取消选择或脚本错误时返回默认路径
+        print(f"文件夹选择取消或出错: {e.output}")
+        return "./img"
 
 FOLDER = choose_folder()
 
