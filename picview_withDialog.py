@@ -7,7 +7,7 @@ from pyglet.window import key, mouse
 import time
 from collections import OrderedDict
 import math
-import subprocess # 用于执行 AppleScript 脚本打开文件选择对话框，代替pyobjc
+import subprocess 
 from concurrent.futures import ThreadPoolExecutor
 import threading
 from PIL import Image
@@ -38,29 +38,31 @@ def print_memory():
 pyglet.clock.schedule_interval(lambda dt: print_memory(), 5)
 
 
-def choose_folder():
-    # AppleScript 脚本（直接返回 POSIX 路径）
-    script = '''
-    tell application "System Events"
-        activate
-        set selectedFolder to POSIX path of (choose folder with prompt "请选择图片目录")
-        return selectedFolder
-    end tell
-    '''
-    
-    try:
-        # 执行脚本并捕获输出
-        result = subprocess.check_output(['osascript', '-e', script], 
-                                        stderr=subprocess.STDOUT,
-                                        universal_newlines=True)
-        # 清理路径（去除换行符和空格）
-        return result.strip()
-    except subprocess.CalledProcessError as e:
-        # 用户取消选择或脚本错误时返回默认路径
-        print(f"文件夹选择取消或出错: {e.output}")
-        return "./img"
 
-FOLDER = choose_folder()
+# def choose_folder():
+#     # AppleScript 脚本（直接返回 POSIX 路径）
+#     script = '''
+#     tell application "System Events"
+#         activate
+#         set selectedFolder to POSIX path of (choose folder with prompt "请选择图片目录")
+#         return selectedFolder
+#     end tell
+#     '''
+    
+#     try:
+#         # 执行脚本并捕获输出
+#         result = subprocess.check_output(['osascript', '-e', script], 
+#                                         stderr=subprocess.STDOUT,
+#                                         universal_newlines=True)
+#         # 清理路径（去除换行符和空格）
+#         return result.strip()
+#     except subprocess.CalledProcessError as e:
+#         # 用户取消选择或脚本错误时返回默认路径
+#         print(f"文件夹选择取消或出错: {e.output}")
+#         return "./img"
+
+# FOLDER = choose_folder()
+FOLDER = "./img"
 
 # 配置区
 DURATION = 5
@@ -425,6 +427,15 @@ class SlideShow:
         
         pyglet.clock.schedule_once(do_cleanup, 0)
 
+def open_file_in_finder(file_path):
+    """ 使用macOS的open命令打开文件所在文件夹并选中文件 """
+    try:
+        subprocess.run(['open', '-R', file_path], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"打开文件夹失败: {e}")
+    except Exception as e:
+        print(f"发生意外错误: {e}")
+
 slides = SlideShow()
 if images:
     slides.current = slides.get_sprite_from_path(images[0])
@@ -488,6 +499,15 @@ def on_key_press(symbol, modifiers):
         elif symbol == key.LEFT:
             if slides.current_index > 0:
                 slides.show_prev_manual()
+         # 新增1键处理
+        elif symbol == key._1 and slides.manual_mode :
+            if images and 0 <= slides.current_index < len(images):
+                current_path = images[slides.current_index]
+                if os.path.exists(current_path):
+                    open_file_in_finder(current_path)
+                else:
+                    print(f"文件不存在: {current_path}")
+
 @window.event
 def on_close():
     # 释放主图片缓存
