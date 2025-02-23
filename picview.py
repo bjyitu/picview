@@ -7,7 +7,7 @@ from pyglet.window import key, mouse
 import time
 from collections import OrderedDict
 import math
-import subprocess 
+import subprocess # 用于执行 AppleScript 脚本，代替pyobjc
 from concurrent.futures import ThreadPoolExecutor
 import threading
 from PIL import Image
@@ -380,6 +380,9 @@ class SlideShow:
 
     def _cleanup_thumbnails(self):
         def do_cleanup(dt):
+            if not pyglet.gl.current_context:  # 关键检查
+                print("OpenGL 上下文已销毁，跳过清理")
+                return
             # 终止进行中的任务
             for task in self.pending_tasks:
                 if not task.done():
@@ -510,23 +513,26 @@ def on_key_press(symbol, modifiers):
 
 @window.event
 def on_close():
-    # 释放主图片缓存
-    for img in image_cache.values():
-        try:
-            img.get_texture().delete()
-        except: pass
-    image_cache.clear()
+    # 停止所有时钟事件
+    pyglet.clock.unschedule(update)
+    pyglet.clock.unschedule(slides.slide_left)
+    pyglet.clock.unschedule(slides.fade_out_old)
     
-    # 释放幻灯片资源
-    if slides.current:
-        slides.current.image.get_texture().delete()
-    if slides.next_img:
-        slides.next_img.image.get_texture().delete()
+    # 关闭线程池并取消任务
+    slides.executor.shutdown(wait=False, cancel_futures=True)
+    slides.pending_tasks.clear()
     
-    slides._cleanup_thumbnails()
-    slides.executor.shutdown(wait=False)
+    # 安全清空缓存（不操作纹理）
+    def safe_clear():
+        image_cache.clear()
+        slides.thumbnail_data_cache.clear()
+        slides.thumbnail_cache.clear()
+    pyglet.clock.schedule_once(safe_clear, 0)
+    
+    # 立即关闭窗口
     window.close()
     pyglet.app.exit()
+    return True  # 阻止默认关闭流程
 
 def update(dt):
     if not slides.manual_mode and not slides.thumbnail_mode:
