@@ -12,57 +12,30 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 from PIL import Image
 
-import psutil
-process = psutil.Process()
+# import psutil
+# process = psutil.Process()
 
-def print_memory():
-    mem = process.memory_info().rss // 1024
-    textures = 0
-    valid_images = 0
+# def print_memory():
+#     mem = process.memory_info().rss // 1024
+#     textures = 0
+#     valid_images = 0
     
-    for img in image_cache.values():
-        try:
-            # 安全获取纹理对象
-            texture = img.get_texture()
-            if texture:
-                textures += 1
-            valid_images += 1
-        except AttributeError:
-            # 处理没有get_texture方法的对象
-            pass
-        except Exception as e:
-            print(f"纹理检测错误: {e}")
+#     for img in image_cache.values():
+#         try:
+#             # 安全获取纹理对象
+#             texture = img.get_texture()
+#             if texture:
+#                 textures += 1
+#             valid_images += 1
+#         except AttributeError:
+#             # 处理没有get_texture方法的对象
+#             pass
+#         except Exception as e:
+#             print(f"纹理检测错误: {e}")
     
-    print(f"内存使用: {mem} KB | 有效缓存: {valid_images}/{len(image_cache)} | 活跃纹理: {textures}")
+#     print(f"内存使用: {mem} KB | 有效缓存: {valid_images}/{len(image_cache)} | 活跃纹理: {textures}")
 
-pyglet.clock.schedule_interval(lambda dt: print_memory(), 5)
-
-
-
-# def choose_folder():
-#     # AppleScript 脚本（直接返回 POSIX 路径）
-#     script = '''
-#     tell application "System Events"
-#         activate
-#         set selectedFolder to POSIX path of (choose folder with prompt "请选择图片目录")
-#         return selectedFolder
-#     end tell
-#     '''
-    
-#     try:
-#         # 执行脚本并捕获输出
-#         result = subprocess.check_output(['osascript', '-e', script], 
-#                                         stderr=subprocess.STDOUT,
-#                                         universal_newlines=True)
-#         # 清理路径（去除换行符和空格）
-#         return result.strip()
-#     except subprocess.CalledProcessError as e:
-#         # 用户取消选择或脚本错误时返回默认路径
-#         print(f"文件夹选择取消或出错: {e.output}")
-#         return "./img"
-
-# FOLDER = choose_folder()
-FOLDER = "./img"
+# pyglet.clock.schedule_interval(lambda dt: print_memory(), 5)
 
 # 配置区
 DURATION = 5
@@ -71,14 +44,81 @@ MAX_IMAGES = 2
 PROGRESS_BAR_HEIGHT = 5
 THREAD_POOL_SIZE = 4
 THUMBNAIL_SIZE = (500, 500)
+# 配置默认路径
+DEFAULT_FOLDER = os.path.abspath("./img")
+FOLDER = None
 
+def choose_folder():
+    """返回选择的路径，取消选择时返回None"""
+    script = '''
+    tell application "System Events"
+        activate
+        try
+            set selectedFolder to POSIX path of (choose folder with prompt "请选择图片目录")
+            return selectedFolder
+        on error
+            return "cancel"
+        end try
+    end tell
+    '''
+    try:
+        result = subprocess.check_output(['osascript', '-e', script], 
+                                       stderr=subprocess.STDOUT,
+                                       universal_newlines=True).strip()
+        return result if result != "cancel" else None
+    except subprocess.CalledProcessError as e:
+        print(f"文件夹选择出错: {e.output}")
+        return None
+
+def validate_folder(path):
+    """验证目录是否包含图片"""
+    if not path or not os.path.isdir(path):
+        return False
+    try:
+        return any(f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))
+                for f in glob(os.path.join(path, '**/*.*'), recursive=True))
+    except Exception as e:
+        print(f"目录扫描错误: {e}")
+        return False
+
+# 第一步：尝试默认目录
+if os.path.exists(DEFAULT_FOLDER) and validate_folder(DEFAULT_FOLDER):
+    FOLDER = DEFAULT_FOLDER
+    print(f"使用默认图片目录: {DEFAULT_FOLDER}")
+
+# 第二步：默认无效时弹出选择对话框
+if not FOLDER:
+    selected = None
+    while not selected:
+        selected = choose_folder()
+        if selected and validate_folder(selected):
+            FOLDER = selected
+        else:
+            # 显示错误提示（macOS通知中心）
+            os.system("""
+            osascript -e 'display notification "目录错误" with title "必须选择包含图片的有效目录"'
+            """)
+            
+    if not FOLDER:
+        print("未选择有效目录，程序退出")
+        exit(1)
+
+
+# 缓动函数
 def ease_out_quad(t):
     return t * (2 - t)
 
 def ease_out_cubic(t):
     return 1 - (1 - t)**3
+    
+def ease_out_sine(t):
+    return math.sin(t * math.pi / 2)
 
-config = pyglet.gl.Config(double_buffer=True)
+config = pyglet.gl.Config(
+    double_buffer=True,
+    sample_buffers=1,  # 开启 MSAA
+    samples=4
+)
 window = pyglet.window.Window(config=config, width=900, height=600, resizable=True, style="None", vsync=True)
 
 images = [f for f in glob(os.path.join(FOLDER, '**/*.*'), recursive=True)
@@ -88,6 +128,7 @@ random.shuffle(images)
 image_cache = OrderedDict()
 
 class SlideShow:
+
     def __init__(self):
         self.batch = pyglet.graphics.Batch()
         self.current = None
@@ -285,8 +326,11 @@ class SlideShow:
             sprite.draw()
 
     def scale_to_fit(self, sprite, max_width, max_height):
-        scale = min(max_width / sprite.width, max_height / sprite.height)
-        sprite.update(scale=scale)
+        if sprite.image:
+            original_width = sprite.image.width
+            original_height = sprite.image.height
+            scale = min(max_width / original_width, max_height / original_height)
+            sprite.scale = scale
 
     def center_sprite(self, sprite, max_width, max_height):
         sprite.x = (max_width - sprite.width) // 2
@@ -309,13 +353,13 @@ class SlideShow:
             self.old_img = self.current
             self.old_img.opacity = 255
         self.next_img.x = window.width
-        clock.schedule_interval(self.slide_left, 1/59)
-        clock.schedule_interval(self.fade_out_old, 1/59)
+        clock.schedule_interval(self.slide_left, 1/60)
+        clock.schedule_interval(self.fade_out_old, 1/60)
 
     def slide_left(self, dt):
         elapsed = time.time() - self.animation_start_time
         progress = min(elapsed / TRANSITION, 1.0)
-        eased_progress = ease_out_cubic(progress)
+        eased_progress = ease_out_quad(progress)
         target_x = (window.width - self.next_img.width) // 2
         self.next_img.x = window.width - (window.width - target_x) * eased_progress
         if progress >= 1.0:
@@ -329,9 +373,12 @@ class SlideShow:
     def fade_out_old(self, dt):
         if self.old_img:
             elapsed = time.time() - self.animation_start_time
-            progress = min(elapsed / TRANSITION, 1.0)
-            eased_progress = ease_out_quad(progress)
-            self.old_img.opacity = int(255 * (1 - eased_progress))
+            # 加速消失 用/4加速
+            progress = min(elapsed / (TRANSITION / 4), 1.0)
+            # 取消缓动函数 eased_progress = ease_out_cubic(progress)
+            eased_progress = progress
+            # 加速消失 把255变100
+            self.old_img.opacity = int(100 * (1 - eased_progress))
             if progress >= 1.0:
                 clock.unschedule(self.fade_out_old)
 
