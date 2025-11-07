@@ -1,1 +1,1 @@
-pyinstaller --onefile --windowed --name view picview.py 
+pyinstaller --onefile --windowed --name view --icon=view.png v.py 
