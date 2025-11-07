@@ -10,7 +10,7 @@ import math
 import subprocess # 用于执行 AppleScript 脚本，代替pyobjc
 from concurrent.futures import ThreadPoolExecutor
 import threading
-from PIL import Image
+from PIL import Image, ImageFilter
 
 # import psutil
 # process = psutil.Process()
@@ -191,13 +191,44 @@ class SlideShow:
             except Exception as e:
                 print(f"清理缓存时出错: {e}")
 
+    def apply_sharpening(self, img_path):
+        """应用锐化效果到图片"""
+        try:
+            # 使用PIL加载图片
+            pil_img = Image.open(img_path)
+            
+            # 应用锐化滤镜
+            sharpened = pil_img.filter(ImageFilter.SHARPEN)
+            
+            # 转换为RGBA模式（确保透明度支持）
+            if sharpened.mode != 'RGBA':
+                sharpened = sharpened.convert('RGBA')
+            
+            # 垂直翻转图像适配pyglet坐标系（与缩略图处理一致）
+            sharpened = sharpened.transpose(Image.FLIP_TOP_BOTTOM)
+            
+            # 获取图片数据
+            img_data = sharpened.tobytes()
+            width, height = sharpened.size
+            
+            # 创建pyglet图像
+            img = pyglet.image.ImageData(width, height, 'RGBA', img_data)
+            
+            # 转换为纹理
+            if not isinstance(img, pyglet.image.Texture):
+                img = img.get_texture()
+                
+            return img
+        except Exception as e:
+            print(f"锐化图片失败: {img_path} - {e}")
+            # 如果锐化失败，返回原始图片
+            return pyglet.image.load(img_path)
+
     def get_sprite_from_path(self, path, add_to_batch=True):
         if path not in image_cache:
             try:
-                # 确保加载的是Texture
-                img = pyglet.image.load(path)
-                if not isinstance(img, pyglet.image.Texture):
-                    img = img.get_texture()
+                # 应用锐化效果后加载图片
+                img = self.apply_sharpening(path)
                 image_cache[path] = img
             except Exception as e:
                 print(f"加载图片失败: {path} - {e}")
