@@ -12,30 +12,6 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 from PIL import Image, ImageFilter
 
-# import psutil
-# process = psutil.Process()
-
-# def print_memory():
-#     mem = process.memory_info().rss // 1024
-#     textures = 0
-#     valid_images = 0
-    
-#     for img in image_cache.values():
-#         try:
-#             # 安全获取纹理对象
-#             texture = img.get_texture()
-#             if texture:
-#                 textures += 1
-#             valid_images += 1
-#         except AttributeError:
-#             # 处理没有get_texture方法的对象
-#             pass
-#         except Exception as e:
-#             print(f"纹理检测错误: {e}")
-    
-#     print(f"内存使用: {mem} KB | 有效缓存: {valid_images}/{len(image_cache)} | 活跃纹理: {textures}")
-
-# pyglet.clock.schedule_interval(lambda dt: print_memory(), 5)
 
 # 配置区
 DURATION = 5
@@ -192,35 +168,78 @@ class SlideShow:
                 print(f"清理缓存时出错: {e}")
 
     def apply_sharpening(self, img_path):
-        """应用锐化效果到图片"""
+        """应用锐化效果到图片（包含重采样优化版）"""
+        sharpened = None
+        img_data = None
+        
         try:
-            # 使用PIL加载图片
-            pil_img = Image.open(img_path)
-            
-            # 应用锐化滤镜
-            sharpened = pil_img.filter(ImageFilter.SHARPEN)
-            
-            # 转换为RGBA模式（确保透明度支持）
-            if sharpened.mode != 'RGBA':
-                sharpened = sharpened.convert('RGBA')
-            
-            # 垂直翻转图像适配pyglet坐标系（与缩略图处理一致）
-            sharpened = sharpened.transpose(Image.FLIP_TOP_BOTTOM)
-            
-            # 获取图片数据
-            img_data = sharpened.tobytes()
-            width, height = sharpened.size
-            
-            # 创建pyglet图像
-            img = pyglet.image.ImageData(width, height, 'RGBA', img_data)
-            
-            # 转换为纹理
-            if not isinstance(img, pyglet.image.Texture):
-                img = img.get_texture()
+            # 使用上下文管理器确保PIL资源正确释放
+            with Image.open(img_path) as pil_img:
+                # 先进行重采样优化（使用LANCZOS算法）
+                # 计算缩放比例，保持图片原始宽高比
+                scale_x = window.width / pil_img.width
+                scale_y = window.height / pil_img.height
+                scale = min(scale_x, scale_y)
                 
-            return img
+                new_width = int(pil_img.width * scale)
+                new_height = int(pil_img.height * scale)
+                
+                # 使用LANCZOS重采样算法进行高质量缩放
+                resampled_img = pil_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                
+                # 在重采样后的图片上应用锐化滤镜
+                sharpened = resampled_img.filter(ImageFilter.UnsharpMask(radius=1.5, percent=60, threshold=3))
+ 
+                # 立即释放resampled_img对象
+                resampled_img.close() if hasattr(resampled_img, 'close') else None
+                del resampled_img
+                resampled_img = None
+
+                # 转换为RGBA模式（确保透明度支持）
+                if sharpened.mode != 'RGBA':
+                    sharpened = sharpened.convert('RGBA')
+                
+                # 垂直翻转图像适配pyglet坐标系
+                sharpened = sharpened.transpose(Image.FLIP_TOP_BOTTOM)
+                
+                # 获取图片尺寸（在获取字节数据前）
+                width, height = sharpened.size
+                
+                # 获取图片数据
+                img_data = sharpened.tobytes()
+                
+                # 立即释放PIL对象
+                sharpened.close() if hasattr(sharpened, 'close') else None
+                del sharpened
+                sharpened = None
+                
+                # 创建pyglet图像
+                img = pyglet.image.ImageData(width, height, 'RGBA', img_data)
+                
+                # 转换为纹理
+                if not isinstance(img, pyglet.image.Texture):
+                    img = img.get_texture()
+                
+                # 清理字节数据
+                del img_data
+                img_data = None
+                
+                return img
         except Exception as e:
             print(f"锐化图片失败: {img_path} - {e}")
+            
+            # 确保在异常情况下也能清理资源
+            if sharpened is not None:
+                sharpened.close() if hasattr(sharpened, 'close') else None
+                del sharpened
+                
+            if img_data is not None:
+                del img_data
+                
+            # 强制垃圾回收
+            import gc
+            gc.collect()
+            
             # 如果锐化失败，返回原始图片
             return pyglet.image.load(img_path)
 
@@ -240,7 +259,8 @@ class SlideShow:
         
         try:
             sprite = pyglet.sprite.Sprite(image_cache[path], batch=self.batch if add_to_batch else None)
-            self.scale_to_fit(sprite, window.width, window.height)
+            # 为了和resample的重绘不重复，不进行组件缩放，会出现当前图片在窗口拉伸后不缩放，重新载入才可以
+            # self.scale_to_fit(sprite, window.width, window.height)
             self.center_sprite(sprite, window.width, window.height)
             window.set_caption(os.path.basename(path))
             return sprite
@@ -261,7 +281,7 @@ class SlideShow:
             return None
 
     def create_sprite_from_data(self, data):
-        """ 在主线程创建精灵 """
+        """ 在主线程创建缩图精灵 """
         try:
             if not pyglet.gl.current_context:
                 print("无OpenGL上下文，跳过创建精灵")
