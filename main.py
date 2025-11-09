@@ -8,6 +8,7 @@ from config import *
 from utils import *      
 from slideshow import SlideShow  
 
+
 # 初始化窗口
 config = pyglet.gl.Config(
     double_buffer=True,
