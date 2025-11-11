@@ -146,14 +146,15 @@ def update(dt):
 
 pyglet.clock.schedule_interval(update, DURATION)
 
-# 如果启用了内存监控，每10秒打印一次内存使用情况
+# 如果启用了内存监控，每60秒打印一次内存使用情况
 from utils import PSUTIL_AVAILABLE, print_memory
 from image_processor import image_cache
 
 if MEMORY_MONITORING and PSUTIL_AVAILABLE:
     def memory_monitor(dt):
+        debug_gc_collect("memory_monitor")
         print_memory(slides, image_cache)
     
-    pyglet.clock.schedule_interval(memory_monitor, 10)
+    pyglet.clock.schedule_interval(memory_monitor, 60)
 
 pyglet.app.run()
