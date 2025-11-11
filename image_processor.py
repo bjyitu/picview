@@ -23,7 +23,7 @@ def apply_sharpening(img_path, window_width, window_height):
     
     try:
         # 使用上下文管理器确保PIL资源正确释放
-        with Image.open(img_path) as pil_img:
+        with Image.open(img_path).convert('RGBA') as pil_img:
             # 先进行重采样优化（使用LANCZOS算法）
             # 计算缩放比例，保持图片原始宽高比
             scale_x = window_width / pil_img.width
@@ -44,9 +44,9 @@ def apply_sharpening(img_path, window_width, window_height):
             del resampled_img
             resampled_img = None
 
-            # 转换为RGBA模式（确保透明度支持）
-            if sharpened.mode != 'RGBA':
-                sharpened = sharpened.convert('RGBA')
+            # # 转换为RGBA模式（确保透明度支持）
+            # if sharpened.mode != 'RGBA':
+            #     sharpened = sharpened.convert('RGBA')
             
             # 垂直翻转图像适配pyglet坐标系
             sharpened = sharpened.transpose(Image.FLIP_TOP_BOTTOM)
