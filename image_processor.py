@@ -1,5 +1,5 @@
 import os
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageEnhance
 import pyglet
 import threading
 from collections import OrderedDict
@@ -33,8 +33,8 @@ def apply_sharpening(img_path, window_width, window_height):
             new_width = int(pil_img.width * scale)
             new_height = int(pil_img.height * scale)
             
-            # 使用LANCZOS重采样算法进行高质量缩放
-            resampled_img = pil_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            # 使用LANCZOS重采样算法进行高质量缩放，增加对比度，配置在config里
+            resampled_img = ImageEnhance.Contrast(pil_img.resize((new_width, new_height), Image.Resampling.LANCZOS)).enhance(IMAGE_ENHANCE)
             
             # 在重采样后的图片上应用锐化滤镜
             sharpened = resampled_img.filter(ImageFilter.UnsharpMask(radius=1.5, percent=60, threshold=3))
